@@ -6,3 +6,4 @@ __pycache__/
 downloads/
 sent_polls.txt
 my-new-bot/     # add this line now
+.cache/
