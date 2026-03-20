@@ -1,6 +1,8 @@
 .env
 *.db
+*.token
 __pycache__/
 *.pyc
 downloads/
 sent_polls.txt
+my-new-bot/     # add this line now

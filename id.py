@@ -3,485 +3,598 @@ from telebot import types
 import sqlite3
 import datetime
 import json
+import html
+import time
+from contextlib import closing
 
 # ==========================================
-# CONFIGURATION - CHANGE THESE!
+# CONFIGURATION - YOUR EXACT DETAILS
 # ==========================================
-BOT_TOKEN = "8575370561:AAGpOu1R0zSRsaqBaPLI8klr_C4EXt0Tb1k" # <-- Put your token here
-ADMIN_ID = 6915757343  # Your Admin ID
-ADMIN_USERNAME = "@Mr_outlaw001" # Replace with your Telegram Username
+BOT_TOKEN = "8575370561:AAH6OlLBYL1Uri_3Fg1KpGUvhDFdUriK_u4"
+ADMIN_ID = 6915757343  
+ADMIN_USERNAME = "@Mr_outlaw001" 
 # ==========================================
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
 
-# --- DATABASE SETUP ---
+# --- BULLETPROOF DATABASE SETUP & AUTO-MIGRATION ---
 def init_db():
-    with sqlite3.connect('users.db') as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users
-                     (user_id INTEGER PRIMARY KEY, plan_type TEXT, expiry_date TEXT, week_start TEXT, checks_used INTEGER)''')
-        conn.commit()
-
+    with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+        with conn:
+            c = conn.cursor()
+            # Create base table
+            c.execute('''CREATE TABLE IF NOT EXISTS users
+                         (user_id INTEGER PRIMARY KEY, plan_type TEXT, expiry_date TEXT, week_start TEXT, checks_used INTEGER)''')
+            # Auto-Migrate: Add phone_number column if it doesn't exist from the old version
+            try:
+                c.execute("ALTER TABLE users ADD COLUMN phone_number TEXT")
+            except sqlite3.OperationalError:
+                pass # Column already exists, safe to proceed
 init_db()
 
 # --- HELPER FUNCTIONS ---
-def escape_md(text):
-    """Prevents the bot from crashing when a username has an underscore '_' or special character"""
-    if not text: return ""
-    return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
+def safe_html(text):
+    if not text: return "None"
+    return html.escape(str(text))
 
 def estimate_date(chat_id):
-    """Estimates date for Users AND Channels/Groups (handling negative IDs)"""
     try:
         chat_id_str = str(chat_id)
         if chat_id_str.startswith("-100"): real_id = int(chat_id_str[4:])
         elif chat_id_str.startswith("-"): real_id = int(chat_id_str[1:])
         else: real_id = int(chat_id)
-    except:
-        real_id = 9999999999
+    except: real_id = 99999999999
 
     if real_id < 100000000: return "2013 - 2014"
     elif real_id < 500000000: return "2015 - 2017"
     elif real_id < 1000000000: return "2018 - 2019"
     elif real_id < 2000000000: return "2020 - 2021"
     elif real_id < 5000000000: return "2022"
-    elif real_id < 6000000000: return "January 2023"
+    elif real_id < 6000000000: return "Early 2023"
     elif real_id < 7000000000: return "Late 2023"
-    else: return "2024 - Present"
+    elif real_id < 7500000000: return "2024"
+    elif real_id < 8000000000: return "2025"
+    else: return "2026 - Present"
 
 def get_ad_text():
-    return (
-        "🧠 **Explanations and answers**\n"
-        "Free AI →[DeepSeek](https://t.me/DeepSeek) & [ChatGPT](https://t.me/ChatGPT)\n\n"
-        "🖼 **Visualize your ideas**\n"
-        "Make Image → [NanoBanana](https://t.me/NanoBanana)"
-    )
+    return "🧠 <b>AI Help</b> → <a href='https://t.me/DeepSeek'>DeepSeek</a>\n🖼 <b>Images</b> → <a href='https://t.me/NanoBanana'>NanoBanana</a>"
 
 def get_contact_admin_markup():
     markup = types.InlineKeyboardMarkup()
-    admin_url = f"https://t.me/{ADMIN_USERNAME.replace('@', '')}"
-    markup.add(types.InlineKeyboardButton("👨‍💻 Contact Admin", url=admin_url))
+    markup.add(types.InlineKeyboardButton("👨‍💻 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}"))
     return markup
 
-# --- RAW JSON KEYBOARD INJECTION ---
+# --- 100% CRASH-PROOF NATIVE KEYBOARDS ---
+def get_registration_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add(types.KeyboardButton(text="📱 Share Phone Number to Start Trial", request_contact=True))
+    return markup
+
 def get_main_keyboard():
-    admin_rights = {
-        "is_anonymous": False, "can_manage_chat": True, "can_delete_messages": False,
-        "can_manage_video_chats": False, "can_restrict_members": False, "can_promote_members": False,
-        "can_change_info": False, "can_invite_users": False, "can_post_messages": False,
-        "can_edit_messages": False, "can_pin_messages": False, "can_manage_topics": False
-    }
-
-    raw_keyboard = {
-        "keyboard": [[
-                {"text": "👤 User", "request_users": {"request_id": 1, "user_is_bot": False, "request_name": True, "request_username": True}},
-                {"text": "🤖 Bot", "request_users": {"request_id": 2, "user_is_bot": True, "request_name": True, "request_username": True}}
-            ],[
-                {"text": "📢 Channel", "request_chat": {"request_id": 3, "chat_is_channel": True, "request_title": True, "request_username": True}},
-                {"text": "👥 Group", "request_chat": {"request_id": 4, "chat_is_channel": False, "chat_is_forum": False, "request_title": True, "request_username": True}}
-            ],[
-                {"text": "🏠 My Channel", "request_chat": {"request_id": 5, "chat_is_channel": True, "user_administrator_rights": admin_rights, "request_title": True, "request_username": True}},
-                {"text": "🏠 My Group", "request_chat": {"request_id": 6, "chat_is_channel": False, "chat_is_forum": False, "user_administrator_rights": admin_rights, "request_title": True, "request_username": True}}
-            ],[
-                {"text": "💬 Forum", "request_chat": {"request_id": 7, "chat_is_channel": False, "chat_is_forum": True, "request_title": True, "request_username": True}},
-                {"text": "💬 My Forum", "request_chat": {"request_id": 8, "chat_is_channel": False, "chat_is_forum": True, "user_administrator_rights": admin_rights, "request_title": True, "request_username": True}}
-            ]
-        ],
-        "resize_keyboard": True
-    }
-    return json.dumps(raw_keyboard)
-
+    """Bypasses library limitations by injecting pure JSON accepted directly by Telegram Servers"""
+    class RawMenu:
+        def to_json(self):
+            return json.dumps({
+                "keyboard": [[
+                        {"text": "👤 User", "request_users": {"request_id": 1, "user_is_bot": False, "request_name": True, "request_username": True}},
+                        {"text": "🤖 Bot", "request_users": {"request_id": 2, "user_is_bot": True, "request_name": True, "request_username": True}}
+                    ],[
+                        {"text": "📢 Channel", "request_chat": {"request_id": 3, "chat_is_channel": True, "request_title": True, "request_username": True}},
+                        {"text": "👥 Group", "request_chat": {"request_id": 4, "chat_is_channel": False, "chat_is_forum": False, "request_title": True, "request_username": True}}
+                    ]
+                ],
+                "resize_keyboard": True
+            })
+    return RawMenu()
 
 # --- SUBSCRIPTION LOGIC ---
-def check_or_create_user(user_id):
-    if user_id == ADMIN_ID:
-        return True, ""
+def check_access(user_id):
+    if user_id == ADMIN_ID: return True, ""
 
-    with sqlite3.connect('users.db') as conn:
-        c = conn.cursor()
-        c.execute("SELECT plan_type, expiry_date, week_start, checks_used FROM users WHERE user_id=?", (user_id,))
-        user = c.fetchone()
-        now = datetime.datetime.now()
+    with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+        with conn:
+            c = conn.cursor()
+            user = c.execute("SELECT plan_type, expiry_date, week_start, checks_used FROM users WHERE user_id=?", (user_id,)).fetchone()
 
-        if not user:
-            expiry = now + datetime.timedelta(days=2)
-            c.execute("INSERT INTO users (user_id, plan_type, expiry_date, week_start, checks_used) VALUES (?, ?, ?, ?, ?)",
-                      (user_id, 'trial', expiry.isoformat(), now.isoformat(), 0))
-            conn.commit()
-            return True, "🎉 **Welcome!** You've been granted a **2-Day Free Trial**.\nEnjoy unlimited checks for 48 hours!"
+            if not user: return False, "REGISTRATION_REQUIRED"
 
-        plan_type, expiry_str, week_start_str, checks_used = user
-        expiry_date = datetime.datetime.fromisoformat(expiry_str)
-        week_start = datetime.datetime.fromisoformat(week_start_str)
+            plan_type, expiry_str, week_start_str, checks_used = user
+            now = datetime.datetime.now()
+            expiry_date = datetime.datetime.fromisoformat(expiry_str)
+            week_start = datetime.datetime.fromisoformat(week_start_str)
 
-        if now > expiry_date:
-            return False, f"❌ Your **{plan_type.upper()}** subscription has expired. Please contact the admin to renew."
+            if now > expiry_date:
+                return False, f"❌ Your <b>{plan_type.upper()}</b> subscription has expired. Contact the admin."
 
-        if now > week_start + datetime.timedelta(days=7):
-            week_start = now
-            checks_used = 0
-            c.execute("UPDATE users SET week_start=?, checks_used=? WHERE user_id=?", (week_start.isoformat(), checks_used, user_id))
-            conn.commit()
+            if now > week_start + datetime.timedelta(days=7):
+                week_start = now
+                checks_used = 0
+                c.execute("UPDATE users SET week_start=?, checks_used=? WHERE user_id=?", (week_start.isoformat(), checks_used, user_id))
 
-        limit = None
-        if plan_type == 'plan1': limit = 50
-        elif plan_type == 'plan2': limit = 200
-        
-        if limit and checks_used >= limit:
-            return False, f"⚠️ You have reached your weekly limit of **{limit} checks**. Please wait for the next week or upgrade your plan."
+            limit = 50 if plan_type == 'plan1' else 200 if plan_type == 'plan2' else 999999
+            if checks_used >= limit and plan_type != 'unlimited':
+                return False, f"⚠️ Weekly limit reached (<b>{limit}</b> checks).\n\nPlease wait until next week or upgrade your plan."
 
-        c.execute("UPDATE users SET checks_used=? WHERE user_id=?", (checks_used + 1, user_id))
-        conn.commit()
-        return True, ""
+            c.execute("UPDATE users SET checks_used=? WHERE user_id=?", (checks_used + 1, user_id))
+            return True, ""
 
 
 # ==========================================
-# USER COMMANDS
+# 1. GENERAL COMMAND HANDLERS 
 # ==========================================
-
-@bot.message_handler(commands=['help'])
-def send_help(message):
-    help_text = (
-        "📖 **ID Bot User Guide**\n\n"
-        "This bot allows you to easily extract Telegram IDs and Registration Dates. "
-        "Simply use our interactive menu at the bottom of your screen, or **Forward a message** to me!\n\n"
-        "**How to use:**\n"
-        "1. Tap any button on the custom keyboard (e.g., '👤 User', '📢 Channel').\n"
-        "2. Or, forward any message/photo/video from a user or channel to me.\n"
-        "3. The bot will instantly reply with their full details!\n\n"
-        "**Available Commands:**\n"
-        "👉 `/start` - Open the main menu & keyboard\n"
-        "👉 `/myplan` - Check your subscription limits and expiry\n"
-        "👉 `/help` - Show this guide\n"
-        "👉 `/contact` - Message the admin for support/upgrades"
-    )
-    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['myplan', 'plan'])
-def check_my_plan(message):
-    user_id = message.from_user.id
-    if user_id == ADMIN_ID:
-        bot.send_message(message.chat.id, "👑 **Admin Status**\nYou are the Admin. You have unlimited lifetime access to all features.", parse_mode="Markdown")
-        return
-
-    with sqlite3.connect('users.db') as conn:
-        c = conn.cursor()
-        c.execute("SELECT plan_type, expiry_date, week_start, checks_used FROM users WHERE user_id=?", (user_id,))
-        user = c.fetchone()
-
-    if not user:
-        bot.send_message(message.chat.id, "You don't have an active plan yet. Send /start to activate your 2-Day Free Trial!", parse_mode="Markdown")
-        return
-
-    plan_type, expiry_str, week_start_str, checks_used = user
-    expiry_date = datetime.datetime.fromisoformat(expiry_str)
-    now = datetime.datetime.now()
-
-    status = "❌ **Expired**" if now > expiry_date else "✅ **Active**"
-    limit = "50" if plan_type == 'plan1' else "200" if plan_type == 'plan2' else "Unlimited"
-    formatted_date = expiry_date.strftime("%Y-%m-%d %H:%M:%S")
-
-    text = f"📋 **Your Subscription Details**\n\n**Status:** {status}\n**Current Plan:** {plan_type.upper()}\n"
-    text += f"**Weekly Usage:** {checks_used} / {limit} checks\n**Expiry Date:** `{formatted_date}`\n\n"
-
-    markup = types.InlineKeyboardMarkup()
-    if now > expiry_date or limit != "Unlimited":
-        admin_url = f"https://t.me/{ADMIN_USERNAME.replace('@', '')}"
-        markup.add(types.InlineKeyboardButton("🚀 Upgrade / Renew Plan", url=admin_url))
-
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
 @bot.message_handler(commands=['start', 'startfresh'])
 def send_welcome(message):
-    my_id = message.from_user.id
-    has_access, msg = check_or_create_user(my_id)
-    
-    if not has_access:
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_contact_admin_markup())
-        return
-    if "Welcome!" in msg:
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-
-    welcome_text = (
-        "👋 **ID Bot**\n\n"
-        "I can help you find the ID and **Registration Date** of any Telegram account, channel, or group.\n\n"
-        "👇 **Forward me a message, or tap a button below:**"
-    )
-    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-    my_username = f"@{message.from_user.username}" if message.from_user.username else "None"
-    my_name = message.from_user.first_name + (f" {message.from_user.last_name}" if message.from_user.last_name else "")
-    
-    # Escape characters to prevent crash
-    my_username = escape_md(my_username)
-    my_name = escape_md(my_name)
-
-    info_text = f"👤 **User**\n\n🆔 **ID:** `{my_id}`\n🔗 **Username:** {my_username}\n📝 **Name:** {my_name}\n"
-    info_text += f"🏳️ **Lang:** {message.from_user.language_code or 'EN'} 🇺🇸\n\n"
-    info_text += f"📆 **Registered:** {estimate_date(my_id)}\n*(Verified by @idbot)*\n\n" + get_ad_text()
-
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton(f"📋 Copy {my_id}", callback_data=f"copy_{my_id}"))
-    markup.add(types.InlineKeyboardButton("🚀 Share ID", switch_inline_query=str(my_id)))
-    bot.send_message(message.chat.id, info_text, parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
-
-@bot.message_handler(commands=['contact'])
-def contact_admin(message):
-    bot.send_message(message.chat.id, "Need help or want to buy a subscription?", reply_markup=get_contact_admin_markup())
-
-
-# ==========================================
-# ADMIN COMMANDS 
-# ==========================================
-@bot.message_handler(commands=['auth'])
-def admin_auth(message):
-    if message.from_user.id != ADMIN_ID: return
     try:
-        target_id = int(message.text.split()[1])
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("Plan 1 (50 checks/wk for 30 days)", callback_data=f"ask_plan1_{target_id}"),
-            types.InlineKeyboardButton("Plan 2 (200 checks/wk for 30 days)", callback_data=f"ask_plan2_{target_id}"),
-            types.InlineKeyboardButton("Unlimited (100 days)", callback_data=f"ask_unlimited_{target_id}")
-        )
-        bot.send_message(message.chat.id, f"Select a plan for user `{target_id}`:", parse_mode="Markdown", reply_markup=markup)
-    except:
-        bot.send_message(message.chat.id, "Usage: `/auth <user_id>`", parse_mode="Markdown")
-
-@bot.message_handler(commands=['unauth'])
-def admin_unauth(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        target_id = int(message.text.split()[1])
-        with sqlite3.connect('users.db') as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM users WHERE user_id=?", (target_id,))
-            conn.commit()
-        bot.send_message(message.chat.id, f"✅ User `{target_id}` unauthorized.")
-    except:
-        bot.send_message(message.chat.id, "Usage: `/unauth <user_id>`", parse_mode="Markdown")
-
-@bot.message_handler(commands=['users'])
-def admin_users(message):
-    if message.from_user.id != ADMIN_ID: return
-    with sqlite3.connect('users.db') as conn:
-        c = conn.cursor()
-        c.execute("SELECT user_id, plan_type, checks_used, expiry_date FROM users")
-        users = c.fetchall()
-    if not users:
-        bot.send_message(message.chat.id, "No users found in database.")
-        return
-    text = "📋 **Authorized Users List:**\n\n"
-    for u in users:
-        exp_date = datetime.datetime.fromisoformat(u[3]).strftime("%Y-%m-%d")
-        text += f"👤 `{u[0]}` | **{u[1]}** | Used: {u[2]} | Exp: {exp_date}\n"
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-# ==========================================
-# CATCH ALL SHARED DATA & FORWARDS
-# ==========================================
-# List of all content types so it can process forwarded photos, videos, etc.
-ALL_TYPES =['text', 'audio', 'document', 'photo', 'sticker', 'video', 'video_note', 'voice', 'location', 'contact', 'user_shared', 'users_shared', 'chat_shared', 'animation', 'poll', 'dice']
-
-@bot.message_handler(func=lambda message: True, content_types=ALL_TYPES)
-def handle_all_messages(message):
-    """Broadband handler to catch Forwarded messages and Keyboard Shared Requests."""
-    try:
+        bot.clear_step_handler_by_chat_id(message.chat.id)
         user_id = message.from_user.id
-        has_access, msg = check_or_create_user(user_id)
-        if not has_access:
-            bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_contact_admin_markup())
+        has_access, msg = check_access(user_id)
+        
+        if msg == "REGISTRATION_REQUIRED":
+            bot.send_message(message.chat.id, "👋 <b>Welcome to ID Bot!</b>\n\nTo prevent spam, please verify your account by sharing your phone number to activate your <b>2-Day Free Trial</b>.", parse_mode="HTML", reply_markup=get_registration_keyboard())
             return
-            
-        msg_data = message.json 
-        
-        # -----------------------------------------------------------------
-        # 1. PROCESSING FORWARDED MESSAGES (New Telegram API & Old API support)
-        # -----------------------------------------------------------------
-        is_forward = False
-        f_id, f_name, f_user, f_type, is_hidden = None, "Unknown", "None", None, False
-        
-        # Check Telegram API v7.0+ Forward format
-        if 'forward_origin' in msg_data:
-            is_forward = True
-            origin = msg_data['forward_origin']
-            t = origin.get('type')
-            
-            if t == 'user':
-                u = origin.get('sender_user', {})
-                f_id = u.get('id')
-                f_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
-                f_user = f"@{u.get('username')}" if u.get('username') else "None"
-                f_type = "🤖 Bot" if u.get('is_bot') else "👤 User"
-            elif t == 'hidden_user':
-                is_hidden = True
-                f_name = origin.get('sender_user_name', 'Unknown')
-            elif t in ['chat', 'channel']:
-                c = origin.get('sender_chat') or origin.get('chat', {})
-                f_id = c.get('id')
-                f_name = c.get('title', 'Unknown')
-                f_user = f"@{c.get('username')}" if c.get('username') else "None"
-                f_type = "📢 Channel" if c.get('type', t) == 'channel' else "👥 Group"
-                
-        # Check Telegram API < v7.0 Forward format (Fallback)
-        elif 'forward_from' in msg_data:
-            is_forward = True
-            u = msg_data['forward_from']
-            f_id = u.get('id')
-            f_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
-            f_user = f"@{u.get('username')}" if u.get('username') else "None"
-            f_type = "🤖 Bot" if u.get('is_bot') else "👤 User"
-        elif 'forward_from_chat' in msg_data:
-            is_forward = True
-            c = msg_data['forward_from_chat']
-            f_id = c.get('id')
-            f_name = c.get('title', 'Unknown')
-            f_user = f"@{c.get('username')}" if c.get('username') else "None"
-            f_type = "📢 Channel" if c.get('type') == 'channel' else "👥 Group"
-        elif 'forward_sender_name' in msg_data:
-            is_forward = True
-            is_hidden = True
-            f_name = msg_data['forward_sender_name']
-
-        # If we successfully detected a forward, send the results!
-        if is_forward:
-            if is_hidden:
-                text = f"❌ **Hidden User**\n\nThis user has hidden their forwarded messages in their privacy settings. I cannot extract their ID or Registration Date.\n\n📝 **Hidden Name:** {escape_md(f_name)}"
-                bot.reply_to(message, text, parse_mode="Markdown")
-                return
-                
-            f_name = escape_md(f_name)
-            f_user = escape_md(f_user)
-            
-            text = f"**{f_type}** (Forwarded)\n\n🆔 **ID:** `{f_id}`\n"
-            if f_user != "None": text += f"🔗 **Username:** {f_user}\n"
-            text += f"📝 **Name/Title:** {f_name}\n\n"
-            text += f"📆 **Registered/Created:** {estimate_date(f_id)}\n\n" + get_ad_text()
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(f"📋 Copy {f_id}", callback_data=f"copy_{f_id}"))
-            markup.add(types.InlineKeyboardButton("🚀 Share ID", switch_inline_query=str(f_id)))
-
-            bot.reply_to(message, text, parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
+        elif not has_access:
+            bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_contact_admin_markup())
             return
 
-        # -----------------------------------------------------------------
-        # 2. PROCESSING KEYBOARD SHARED USERS & BOTS
-        # -----------------------------------------------------------------
-        if 'users_shared' in msg_data or 'user_shared' in msg_data:
-            users = msg_data.get('users_shared', {}).get('users',[]) if 'users_shared' in msg_data else[msg_data.get('user_shared')]
-            req_id = msg_data.get('users_shared', {}).get('request_id') or msg_data.get('user_shared', {}).get('request_id')
-                
-            for u in users:
-                target_id = u.get('user_id')
-                name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or "Unknown"
-                username = f"@{u['username']}" if 'username' in u else "None"
-                
-                if name == "Unknown" and username == "None":
-                    try:
-                        info = bot.get_chat(target_id)
-                        name = info.first_name + (f" {info.last_name}" if info.last_name else "")
-                        username = f"@{info.username}" if info.username else "None"
-                    except: pass
-                    
-                name = escape_md(name)
-                username = escape_md(username)
-                
-                is_bot = (req_id == 2)
-                shared_type = "Bot" if is_bot else "User"
-                icon = "🤖" if is_bot else "👤"
+        bot.send_message(message.chat.id, "👋 <b>ID Bot Menu</b>\nTap a button below, or forward a message/file to me!\n\n<i>Need help? Send /guide</i>", parse_mode="HTML", reply_markup=get_main_keyboard())
+    except Exception as e: 
+        bot.send_message(message.chat.id, f"⚠️ Start Error: {e}")
 
-                text = f"{icon} **{shared_type}**\n\n🆔 **ID:** `{target_id}`\n🔗 **Username:** {username}\n📝 **Name:** {name}\n"
-                text += f"\n📆 **Registered:** {estimate_date(target_id)}\n\n" + get_ad_text()
-
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton(f"📋 Copy {target_id}", callback_data=f"copy_{target_id}"))
-                markup.add(types.InlineKeyboardButton("🚀 Share ID", switch_inline_query=str(target_id)))
-
-                bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
-
-        # -----------------------------------------------------------------
-        # 3. PROCESSING KEYBOARD SHARED CHANNELS, GROUPS & FORUMS
-        # -----------------------------------------------------------------
-        elif 'chat_shared' in msg_data:
-            chat = msg_data['chat_shared']
-            chat_id = chat.get('chat_id')
-            req_id = chat.get('request_id')
-            title = chat.get('title', 'Unknown')
-            username = f"@{chat['username']}" if 'username' in chat else "None"
+@bot.message_handler(commands=['myplan'])
+def check_my_plan(message):
+    try:
+        if message.from_user.id == ADMIN_ID:
+            bot.send_message(message.chat.id, "👑 <b>Admin Status Active (Unlimited Check Bypass)</b>", parse_mode="HTML")
+            return
             
-            if title == "Unknown" and username == "None":
-                try:
-                    info = bot.get_chat(chat_id)
-                    title = info.title or "Unknown"
-                    username = f"@{info.username}" if info.username else "None"
-                except: pass
+        with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+            user = conn.cursor().execute("SELECT plan_type, expiry_date, checks_used FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
+        
+        if not user: return
+        exp_date = datetime.datetime.fromisoformat(user[1]).strftime("%Y-%m-%d %H:%M")
+        bot.send_message(message.chat.id, f"📋 <b>Plan:</b> {user[0].upper()}\n📈 <b>Used:</b> {user[2]} checks\n⏳ <b>Expires:</b> <code>{exp_date}</code>", parse_mode="HTML", reply_markup=get_contact_admin_markup())
+    except Exception as e: 
+        bot.send_message(message.chat.id, f"⚠️ Plan Error: {e}")
 
-            title = escape_md(title)
-            username = escape_md(username)
+@bot.message_handler(commands=['help', 'guide'])
+def send_guide(message):
+    guide_text = (
+        "📖 <b>ULTIMATE ID BOT GUIDE</b>\n\n"
+        "Welcome to the most advanced ID extraction bot! Here is exactly how to use all features:\n\n"
+        "<b>1️⃣ Extracting Account/Chat IDs</b>\n"
+        "• Look at the <b>bottom of your screen</b> for the custom keyboard (👤 User, 📢 Channel, etc.).\n"
+        "• Tap any button and select a target. The bot will instantly pull their hidden ID, Name, and Creation Date!\n\n"
+        "<b>2️⃣ Forwarded Messages Extraction</b>\n"
+        "• Forward <b>ANY</b> message from a user, channel, or group to this bot.\n"
+        "• We will reveal the original sender's ID, even if they have privacy settings enabled (shows as Hidden).\n\n"
+        "<b>3️⃣ Media & File Server IDs</b>\n"
+        "• Send any Photo, Video, Sticker, Audio, Document, Voice Note, or GIF directly to the bot.\n"
+        "• It will instantly return the unique Telegram Server <code>file_id</code> for that specific media.\n\n"
+        "<b>4️⃣ Subscriptions & Limits</b>\n"
+        "• <b>Trial:</b> 2 Days Free\n"
+        "• <b>Plan 1:</b> 50 Checks per Week\n"
+        "• <b>Plan 2:</b> 200 Checks per Week\n"
+        "• <i>Limits reset every 7 days automatically. Contact Admin to upgrade.</i>\n\n"
+        "<i>Tap buttons below for specific topics:</i>"
+    )
+    bot.send_message(message.chat.id, guide_text, parse_mode="HTML", reply_markup=guide_markup(True))
 
-            if req_id in[3, 5]: chat_type, icon = ("Channel", "📢")
-            elif req_id in[4, 6]: chat_type, icon = ("Group", "👥")
-            else: chat_type, icon = ("Forum", "💬")
 
-            text = f"{icon} **{chat_type}**\n\n🆔 **ID:** `{chat_id}`\n"
-            if username != "None": text += f"🔗 **Username:** {username}\n"
-            text += f"📝 **Title:** {title}\n\n"
-            text += f"📆 **Created:** {estimate_date(chat_id)}\n\n"
+# ==========================================
+# 2. POWERFUL ADMIN DASHBOARD COMMANDS
+# ==========================================
 
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(f"📋 Copy {chat_id}", callback_data=f"copy_{chat_id}"))
-            markup.add(types.InlineKeyboardButton("🚀 Share ID", switch_inline_query=str(chat_id)))
+@bot.message_handler(commands=['authlist'])
+def admin_authlist(message):
+    try:
+        if message.from_user.id != ADMIN_ID: 
+            bot.reply_to(message, "⚠️ <b>Access Denied:</b> You are not the bot owner.", parse_mode="HTML")
+            return
+            
+        with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+            users = conn.cursor().execute("SELECT user_id, phone_number, plan_type, expiry_date FROM users ORDER BY expiry_date DESC").fetchall()
+        
+        if not users: 
+            bot.send_message(message.chat.id, "⚠️ No users found in database.", parse_mode="HTML")
+            return
 
-            bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+        now = datetime.datetime.now()
+        active_users =[]
+        expired_users =[]
+
+        for u in users:
+            exp_date = datetime.datetime.fromisoformat(u[3])
+            phone = u[1] if u[1] else "No Phone"
+            exp_str = exp_date.strftime("%Y-%m-%d")
+            line = f"👤 <code>{u[0]}</code> | 📱 {phone} | <b>{u[2].upper()}</b> | Exp: {exp_str}\n"
+            
+            if exp_date > now: active_users.append(line)
+            else: expired_users.append(line)
+
+        full_lines =[]
+        full_lines.append(f"📋 <b>Total Database ({len(users)} users):</b>\n\n")
+        full_lines.append(f"🟢 <b>ACTIVE USERS ({len(active_users)}):</b>\n")
+        if active_users: full_lines.extend(active_users)
+        else: full_lines.append("<i>None</i>\n")
+        
+        full_lines.append(f"\n🔴 <b>EXPIRED USERS ({len(expired_users)}):</b>\n")
+        if expired_users: full_lines.extend(expired_users)
+        else: full_lines.append("<i>None</i>\n")
+
+        chunk = ""
+        for line in full_lines:
+            if len(chunk) + len(line) > 3900:
+                bot.send_message(message.chat.id, chunk, parse_mode="HTML")
+                chunk = ""
+            chunk += line
+        if chunk: 
+            bot.send_message(message.chat.id, chunk, parse_mode="HTML")
             
     except Exception as e:
-        print(f"Error processing message: {e}")
+        bot.reply_to(message, f"❌ <b>Error in /authlist:</b> {e}", parse_mode="HTML")
 
-# ==========================================
-# CALLBACKS
-# ==========================================
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    if call.data.startswith("copy_"):
-        bot.answer_callback_query(call.id, "ID Copied! (Tap the ID text above to copy it to clipboard)", show_alert=True)
-    elif call.data.startswith("check_date_"):
-        bot.answer_callback_query(call.id, "Cannot fetch precise registration dates for shared users.", show_alert=True)
-    
-    elif call.data.startswith("ask_"):
-        if call.from_user.id != ADMIN_ID: return
-        plan, target_id = call.data.split('_')[1], call.data.split('_')[2]
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("✅ YES", callback_data=f"confirm_{plan}_{target_id}"),
-            types.InlineKeyboardButton("❌ NO", callback_data="cancel_auth")
-        )
-        bot.edit_message_text(f"Are you sure you want to grant **{plan.upper()}** to user `{target_id}`?", 
-                              chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                              parse_mode="Markdown", reply_markup=markup)
 
-    elif call.data == "cancel_auth":
-        if call.from_user.id != ADMIN_ID: return
-        bot.edit_message_text("❌ Authorization cancelled.", chat_id=call.message.chat.id, message_id=call.message.message_id)
+@bot.message_handler(commands=['userinfo'])
+def admin_userinfo(message):
+    try:
+        if message.from_user.id != ADMIN_ID: 
+            bot.reply_to(message, "⚠️ <b>Access Denied.</b>", parse_mode="HTML")
+            return
+            
+        args = message.text.split()
+        if len(args) == 2:
+            target_id = int(args[1])
+            with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+                user = conn.cursor().execute("SELECT phone_number, plan_type, expiry_date, checks_used FROM users WHERE user_id=?", (target_id,)).fetchone()
+            if user:
+                phone, plan, exp, checks = user
+                phone_str = phone if phone else "No Phone"
+                exp_date = datetime.datetime.fromisoformat(exp).strftime('%Y-%m-%d %H:%M')
+                bot.send_message(message.chat.id, f"👤 <b>User Info:</b> <code>{target_id}</code>\n📱 <b>Phone:</b> {phone_str}\n💳 <b>Plan:</b> {plan.upper()}\n📈 <b>Checks Used:</b> {checks}\n⏳ <b>Expires:</b> {exp_date}", parse_mode="HTML")
+            else:
+                bot.send_message(message.chat.id, "⚠️ User not found in database.", parse_mode="HTML")
+        else:
+            bot.send_message(message.chat.id, "Usage: <code>/userinfo <user_id></code>", parse_mode="HTML")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ <b>Error in /userinfo:</b> {e}", parse_mode="HTML")
 
-    elif call.data.startswith("confirm_"):
-        if call.from_user.id != ADMIN_ID: return
-        plan, target_id = call.data.split('_')[1], int(call.data.split('_')[2])
-        now = datetime.datetime.now()
-        days = 100 if plan == 'unlimited' else 30
-        expiry = now + datetime.timedelta(days=days)
 
-        with sqlite3.connect('users.db') as conn:
-            c = conn.cursor()
-            c.execute("REPLACE INTO users (user_id, plan_type, expiry_date, week_start, checks_used) VALUES (?, ?, ?, ?, ?)",
-                      (target_id, plan, expiry.isoformat(), now.isoformat(), 0))
-            conn.commit()
-
-        bot.edit_message_text(f"✅ Successfully granted **{plan.upper()}** to `{target_id}` for {days} days.", 
-                              chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
-        try: bot.send_message(target_id, f"🎉 **Good News!**\nThe Admin has granted you the **{plan.upper()}** subscription for {days} days!\nEnjoy your access. Send /myplan to check details.", parse_mode="Markdown")
+@bot.message_handler(commands=['addtime'])
+def admin_addtime(message):
+    try:
+        if message.from_user.id != ADMIN_ID: 
+            bot.reply_to(message, "⚠️ <b>Access Denied.</b>", parse_mode="HTML")
+            return
+            
+        args = message.text.split()
+        if len(args) != 3:
+            bot.send_message(message.chat.id, "Usage: <code>/addtime <user_id> <days></code>\nExample: <code>/addtime 123456789 10</code>", parse_mode="HTML")
+            return
+            
+        target_id = int(args[1])
+        days = int(args[2])
+        
+        with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+            with conn:
+                c = conn.cursor()
+                user = c.execute("SELECT expiry_date FROM users WHERE user_id=?", (target_id,)).fetchone()
+                if not user:
+                    bot.send_message(message.chat.id, "⚠️ User not found in DB.")
+                    return
+                
+                current_exp = datetime.datetime.fromisoformat(user[0])
+                if current_exp < datetime.datetime.now(): current_exp = datetime.datetime.now()
+                new_exp = current_exp + datetime.timedelta(days=days)
+                c.execute("UPDATE users SET expiry_date=? WHERE user_id=?", (new_exp.isoformat(), target_id))
+                
+        bot.send_message(message.chat.id, f"✅ Added {days} days to <code>{target_id}</code>.\nNew Expiry: {new_exp.strftime('%Y-%m-%d %H:%M')}", parse_mode="HTML")
+        try: bot.send_message(target_id, f"🎁 <b>Bonus Time!</b>\nAdmin has added {days} days to your subscription!\nNew Expiry: {new_exp.strftime('%Y-%m-%d %H:%M')}", parse_mode="HTML")
         except: pass
+        
+    except ValueError:
+        bot.send_message(message.chat.id, "⚠️ ID and Days must be numbers.", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ <b>Error in /addtime:</b> {e}", parse_mode="HTML")
 
-print("🤖 ID Bot initialized successfully. Waiting for requests...")
-bot.infinity_polling(timeout=10, long_polling_timeout=5)
+
+@bot.message_handler(commands=['search'])
+def admin_search(message):
+    try:
+        if message.from_user.id != ADMIN_ID: 
+            bot.reply_to(message, "⚠️ <b>Access Denied.</b>", parse_mode="HTML")
+            return
+            
+        args = message.text.split()
+        if len(args) > 1:
+            phone_query = args[1]
+            with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+                users = conn.cursor().execute("SELECT user_id, phone_number, plan_type FROM users WHERE phone_number LIKE ?", (f"%{phone_query}%",)).fetchall()
+            if users:
+                text = f"🔍 <b>Search Results for '{phone_query}':</b>\n\n"
+                for u in users:
+                    phone_str = u[1] if u[1] else "No Phone"
+                    text += f"👤 ID: <code>{u[0]}</code> | 📱 {phone_str} | 💳 {u[2].upper()}\n"
+                bot.send_message(message.chat.id, text, parse_mode="HTML")
+            else:
+                bot.send_message(message.chat.id, "⚠️ No users found matching that phone number.", parse_mode="HTML")
+        else:
+            bot.send_message(message.chat.id, "Usage: <code>/search <phone_number></code>", parse_mode="HTML")
+            
+    except Exception as e:
+        bot.reply_to(message, f"❌ <b>Error in /search:</b> {e}", parse_mode="HTML")
+
+
+@bot.message_handler(commands=['auth'])
+def admin_auth(message):
+    try:
+        if message.from_user.id != ADMIN_ID: 
+            bot.reply_to(message, "⚠️ Access Denied.")
+            return
+        args = message.text.split()
+        if len(args) > 1:
+            try:
+                target_id = int(args[1])
+                send_plan_selection(message.chat.id, target_id)
+            except ValueError:
+                bot.send_message(message.chat.id, "⚠️ Invalid ID format. Must be numbers.", parse_mode="HTML")
+        else:
+            msg = bot.send_message(message.chat.id, "✍️ <b>Please send the User ID you want to authorize:</b>", parse_mode="HTML")
+            bot.register_next_step_handler(msg, process_auth_id)
+    except Exception as e: bot.reply_to(message, f"Error: {e}")
+
+def process_auth_id(message):
+    if not message.text or message.text.startswith('/'):
+        bot.send_message(message.chat.id, "⚠️ Authorization cancelled.", parse_mode="HTML")
+        return
+    try:
+        target_id = int(message.text.strip())
+        send_plan_selection(message.chat.id, target_id)
+    except ValueError:
+        bot.send_message(message.chat.id, "⚠️ Invalid ID format. Authorization cancelled.", parse_mode="HTML")
+
+def send_plan_selection(chat_id, target_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🥉 Plan 1 (50 checks/wk) - 30 Days", callback_data=f"ask_plan1_{target_id}"),
+        types.InlineKeyboardButton("🥈 Plan 2 (200 checks/wk) - 30 Days", callback_data=f"ask_plan2_{target_id}"),
+        types.InlineKeyboardButton("👑 Unlimited (Unlimited) - 100 Days", callback_data=f"ask_unlimited_{target_id}"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_auth")
+    )
+    bot.send_message(chat_id, f"⚙️ <b>Select a subscription plan for user:</b> <code>{target_id}</code>", parse_mode="HTML", reply_markup=markup)
+
+
+# ==========================================
+# 3. REGISTRATION HANDLER
+# ==========================================
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    try:
+        user_id = message.from_user.id
+        if message.contact is not None:
+            if message.contact.user_id and message.contact.user_id != user_id:
+                bot.send_message(message.chat.id, "⚠️ <b>Fraud Detected:</b> You must use the button below to share YOUR OWN contact.", parse_mode="HTML")
+                return
+
+            phone = message.contact.phone_number
+            now = datetime.datetime.now()
+            expiry = now + datetime.timedelta(days=2)
+            
+            with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+                with conn:
+                    c = conn.cursor()
+                    # Safe insert
+                    c.execute("INSERT OR IGNORE INTO users (user_id, phone_number, plan_type, expiry_date, week_start, checks_used) VALUES (?, ?, ?, ?, ?, ?)",
+                              (user_id, phone, 'trial', expiry.isoformat(), now.isoformat(), 0))
+            
+            bot.send_message(message.chat.id, "✅ <b>Registration Successful!</b>\nYour 2-Day Free Trial is active. Menu unlocked below 👇", parse_mode="HTML", reply_markup=get_main_keyboard())
+    except Exception as e: print(f"Contact Error: {e}")
+
+
+# ==========================================
+# 4. UNIVERSAL EXTRACTION CATCH-ALL
+# ==========================================
+@bot.message_handler(func=lambda message: True, content_types=['text', 'user_shared', 'users_shared', 'chat_shared', 'audio', 'photo', 'voice', 'video', 'document', 'sticker', 'animation', 'video_note', 'location', 'venue', 'dice', 'poll'])
+def handle_all_requests(message):
+    try:
+        msg_data = message.json 
+
+        # Handle User Extractions
+        if 'users_shared' in msg_data or 'user_shared' in msg_data:
+            user_id = message.from_user.id
+            has_access, msg = check_access(user_id)
+            if msg == "REGISTRATION_REQUIRED": return
+            if not has_access:
+                bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_contact_admin_markup())
+                return
+
+            users = msg_data.get('users_shared', {}).get('users',[]) if 'users_shared' in msg_data else [msg_data.get('user_shared')]
+            req_id = msg_data.get('users_shared', {}).get('request_id') or msg_data.get('user_shared', {}).get('request_id')
+            for u in users:
+                target_id = u.get('user_id')
+                name = safe_html(f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or "Unknown")
+                username = safe_html(f"@{u['username']}" if 'username' in u else "None")
+                icon = "🤖 Bot" if req_id == 2 else "👤 User"
+                bot.send_message(message.chat.id, f"{icon}\n\n🆔 <b>ID:</b> <code>{target_id}</code>\n🔗 <b>Username:</b> {username}\n📝 <b>Name:</b> {name}\n📆 <b>Registered:</b> {estimate_date(target_id)}\n\n{get_ad_text()}", parse_mode="HTML")
+            return
+
+        # Handle Chat/Channel Extractions
+        elif 'chat_shared' in msg_data:
+            user_id = message.from_user.id
+            has_access, msg = check_access(user_id)
+            if msg == "REGISTRATION_REQUIRED": return
+            if not has_access:
+                bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_contact_admin_markup())
+                return
+
+            chat = msg_data['chat_shared']
+            chat_id = chat.get('chat_id')
+            title = safe_html(chat.get('title', 'Unknown'))
+            username = safe_html(f"@{chat['username']}" if 'username' in chat else "None")
+            icon = "📢 Channel" if chat.get('request_id') in[3, 5] else "👥 Group/Forum"
+            bot.send_message(message.chat.id, f"{icon}\n\n🆔 <b>ID:</b> <code>{chat_id}</code>\n🔗 <b>Username:</b> {username}\n📝 <b>Title:</b> {title}\n📆 <b>Created:</b> {estimate_date(chat_id)}\n\n{get_ad_text()}", parse_mode="HTML")
+            return
+
+        # Handle Message Forwards
+        if message.forward_from or message.forward_from_chat or message.forward_sender_name:
+            user_id = message.from_user.id
+            has_access, msg = check_access(user_id)
+            if msg == "REGISTRATION_REQUIRED": return
+            if not has_access:
+                bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_contact_admin_markup())
+                return
+
+            if message.forward_from: target_id, name, t = message.forward_from.id, safe_html(message.forward_from.first_name), "👤 Forwarded User"
+            elif message.forward_from_chat: target_id, name, t = message.forward_from_chat.id, safe_html(message.forward_from_chat.title), "📢 Forwarded Chat"
+            elif message.forward_sender_name:
+                bot.send_message(message.chat.id, f"👻 <b>Hidden Account</b>\n\nTelegram hides this ID due to their privacy settings.\n📝 <b>Name:</b> {safe_html(message.forward_sender_name)}", parse_mode="HTML")
+                return
+            bot.send_message(message.chat.id, f"↪️ <b>{t}</b>\n\n🆔 <b>Original ID:</b> <code>{target_id}</code>\n📝 <b>Name/Title:</b> {name}\n📆 <b>Est. Date:</b> {estimate_date(target_id)}", parse_mode="HTML")
+            return
+
+        # Handle Media Extractions
+        meta, t_type = None, None
+        if message.photo: meta, t_type = message.photo[-1].file_id, "🖼 Photo ID"
+        elif message.sticker: meta, t_type = message.sticker.file_id, "🎃 Sticker ID"
+        elif message.video: meta, t_type = message.video.file_id, "🎬 Video ID"
+        elif message.document: meta, t_type = message.document.file_id, "📁 Document ID"
+        elif message.audio: meta, t_type = message.audio.file_id, "🎵 Audio ID"
+        elif message.voice: meta, t_type = message.voice.file_id, "🎤 Voice Note ID"
+        elif message.animation: meta, t_type = message.animation.file_id, "🎞 GIF ID"
+        elif message.video_note: meta, t_type = message.video_note.file_id, "📹 Video Note ID"
+        elif message.poll: meta, t_type = message.poll.id, "📊 Poll ID"
+        elif message.location: meta, t_type = f"Lat: {message.location.latitude}\nLong: {message.location.longitude}", "📍 Location Data"
+        elif message.dice: meta, t_type = f"Emoji: {message.dice.emoji}\nValue: {message.dice.value}", "🎲 Dice Data"
+
+        if meta:
+            user_id = message.from_user.id
+            has_access, msg = check_access(user_id)
+            if msg == "REGISTRATION_REQUIRED": return
+            if not has_access:
+                bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_contact_admin_markup())
+                return
+                
+            bot.reply_to(message, f"<b>{t_type}:</b>\n<code>{meta}</code>\n\n<i>(Tap to copy)</i>", parse_mode="HTML")
+            return
+
+        # Text Fallback to force Keyboard Menu
+        if message.text and not message.text.startswith('/'):
+            bot.send_message(message.chat.id, "🤖 <b>ID Extractor Ready!</b>\n\nTap the buttons below to extract an ID, or forward any message/file to me!", parse_mode="HTML", reply_markup=get_main_keyboard())
+
+    except Exception as e: print(f"Extraction Guard Caught: {e}")
+
+
+# ==========================================
+# 5. BUTTON CALLBACK HANDLERS
+# ==========================================
+def guide_markup(main=True):
+    m = types.InlineKeyboardMarkup(row_width=1)
+    if main:
+        m.add(types.InlineKeyboardButton("🔍 How to Extract IDs", callback_data="g_extract"),
+              types.InlineKeyboardButton("📁 Getting Media/File IDs", callback_data="g_media"),
+              types.InlineKeyboardButton("💳 Subscriptions & Limits", callback_data="g_subs"),
+              types.InlineKeyboardButton("🔒 Privacy Policy", callback_data="g_privacy"))
+    else: m.add(types.InlineKeyboardButton("🔙 Back to Menu", callback_data="g_main"))
+    return m
+
+@bot.callback_query_handler(func=lambda call: True)
+def master_callback(call):
+    try:
+        # --- GUIDE INTERFACE ---
+        if call.data.startswith("g_"):
+            if call.data == "g_main": text, m = "📖 <b>Ultimate Guide</b>\n\nChoose a topic below:", guide_markup(True)
+            elif call.data == "g_extract": text, m = "🔍 <b>How to Extract IDs</b>\n\n<b>1:</b> Look at the bottom keyboard. Tap '👤 User', '📢 Channel', or '👥 Group' and select a chat.\n<b>2:</b> Forward ANY message to this bot to instantly reveal the original sender's ID!", guide_markup(False)
+            elif call.data == "g_media": text, m = "📁 <b>Getting File IDs</b>\n\nSend any media file directly to this bot to get its Server File ID.\n\n<i>Supported: Photos, Videos, Stickers, Audio, Voice Notes, Documents, GIFs, Polls, and Locations!</i>", guide_markup(False)
+            elif call.data == "g_subs": text, m = "💳 <b>Subscriptions</b>\n\nNew users get a 2-Day Free Trial. Limits reset automatically every 7 days.\n\nContact the Admin via the /start menu to purchase Plan 1 (50 checks/wk) or Plan 2 (200 checks/wk).", guide_markup(False)
+            elif call.data == "g_privacy": text, m = "🔒 <b>Privacy</b>\n\nWe require your phone number upon registration strictly to prevent abuse and spam. It is stored securely and never shared.", guide_markup(False)
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=m)
+            return
+
+        # --- ADMIN AUTHENTICATION INTERFACE ---
+        if call.from_user.id != ADMIN_ID: 
+            bot.answer_callback_query(call.id, "⚠️ Restricted Admin action.", show_alert=True)
+            return
+
+        if call.data.startswith("ask_"):
+            parts = call.data.split('_')
+            plan, target_id = parts[1], parts[2]
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("✅ CONFIRM YES", callback_data=f"confirm_{plan}_{target_id}"), 
+                types.InlineKeyboardButton("❌ NO", callback_data="cancel_auth")
+            )
+            bot.edit_message_text(f"❓ <b>Confirm Action:</b>\nAre you sure you want to grant <b>{plan.upper()}</b> to <code>{target_id}</code>?", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=markup)
+
+        elif call.data == "cancel_auth":
+            bot.edit_message_text("❌ <b>Action Cancelled.</b>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML")
+
+        elif call.data.startswith("confirm_"):
+            bot.edit_message_text("⏳ <i>Processing authorization...</i>", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML")
+            
+            parts = call.data.split('_')
+            plan = parts[1]
+            target_id = int(parts[2])
+            
+            now = datetime.datetime.now()
+            days = 100 if plan == 'unlimited' else 30
+            expiry = now + datetime.timedelta(days=days)
+
+            with closing(sqlite3.connect('users.db', check_same_thread=False)) as conn:
+                with conn:
+                    c = conn.cursor()
+                    # Look up phone safely
+                    try:
+                        existing = c.execute("SELECT phone_number FROM users WHERE user_id=?", (target_id,)).fetchone()
+                        phone = existing[0] if existing else "Admin_Added"
+                    except: phone = "Admin_Added"
+                    
+                    c.execute("REPLACE INTO users (user_id, phone_number, plan_type, expiry_date, week_start, checks_used) VALUES (?, ?, ?, ?, ?, ?)",
+                              (target_id, phone, plan, expiry.isoformat(), now.isoformat(), 0))
+
+            bot.edit_message_text(f"✅ <b>Success!</b>\nGranted <b>{plan.upper()}</b> to <code>{target_id}</code> for {days} days.", chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML")
+            try: bot.send_message(target_id, f"🎉 <b>Good News!</b>\nAdmin has granted you the <b>{plan.upper()}</b> subscription!\nEnjoy your premium access.", parse_mode="HTML")
+            except: pass
+            
+    except Exception as e: print(f"Callback Guard Caught: {e}")
+
+# ==========================================
+# UI COMMAND MENU SETUP
+# ==========================================
+def setup_bot_commands():
+    try:
+        user_commands =[
+            types.BotCommand("start", "🚀 Start the bot & menu"),
+            types.BotCommand("myplan", "📋 Check active plan & limits"),
+            types.BotCommand("guide", "📖 Detailed bot tutorial")
+        ]
+        bot.set_my_commands(user_commands, scope=types.BotCommandScopeDefault())
+        
+        admin_commands =[
+            types.BotCommand("start", "🚀 Start the bot"),
+            types.BotCommand("myplan", "📋 Check your admin plan"),
+            types.BotCommand("guide", "📖 Detailed bot tutorial"),
+            types.BotCommand("auth", "⚙️ Authorize a user ID"),
+            types.BotCommand("authlist", "📋 View active & expired users"),
+            types.BotCommand("userinfo", "👤 Check specific user info"),
+            types.BotCommand("addtime", "⏳ Add bonus days to a user"),
+            types.BotCommand("search", "🔍 Search user by phone")
+        ]
+        bot.set_my_commands(admin_commands, scope=types.BotCommandScopeChat(ADMIN_ID))
+        print("✅ Command Menus successfully set up in Telegram UI!")
+    except Exception as e:
+        print(f"⚠️ Could not set command menus: {e}")
+
+# ==========================================
+# INFINITE RESURRECTION LOOP
+# ==========================================
+print("🛡️ Mr_outlaw001's Ultimate Bot is now ONLINE!")
+setup_bot_commands()
+
+while True:
+    try:
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        print(f"Network Interruption Caught: {e}. Resurrecting in 3 seconds...")
+        time.sleep(3)

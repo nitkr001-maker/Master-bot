@@ -1,3 +1,11 @@
 [user]
 	email = nitkr.001@gmail.com
-	name = nitkr.001-coder
+	name = nitkr001-maker
+[http]
+	postBuffer = 157286400
+[credential "https://github.com"]
+	helper = 
+	helper = !/data/data/com.termux/files/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/data/data/com.termux/files/usr/bin/gh auth git-credential
